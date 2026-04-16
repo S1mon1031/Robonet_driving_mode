@@ -1,0 +1,32 @@
+# 数据集
+data/
+
+# 模型权重
+state_dict/
+*.pt
+*.pth
+*.ckpt
+
+#日志文件
+logs/
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE配置
+.vscode/
+.idea/
+*.swp
+
+# 环境
+venv/
+env/
+.venv/
+
+# 其他大文件
+*.zip
+*.tar
+*.gz

@@ -1,0 +1,62 @@
+
+# 矿车轨迹跟踪模型配置
+# state:   (lateral_error, s_error, heading_error, v, a, kappa)  6维
+# target:  (v_ref, a_ref, kappa_ref)                             3维，来自planning
+# context: (pitch, load)                                         2维，坡度+负载
+
+# Model -------------------------------
+device: cpu
+state_dim: 6      # lateral_error, s_error, heading_error, v, a, kappa
+target_dim: 3     # v_ref, a_ref, kappa_ref
+context_dim: 2    # pitch(rad), load(0=轻载/1=重载)
+horizon: 9        # 历史/未来窗口长度（2H+1=19步 state_seq，3H=27步 target_seq）
+train_horizon: 9  # 训练时展开的步数
+
+# predictor（闭环动力学模型）
+# 输入包含context，表示"当前坡度和负载下，期望轨迹的实际响应"
+predictor_type: mlp_norm
+predictor_dropout: 0.1
+predictor_max_range: 1.0
+predictor_hidden_dim: 256
+predictor_hidden_depth: 4
+predictor_lr: 0.00005
+predictor_weight_decay: 0.01
+predictor_max_norm: 2
+predictor_discount: 0.95
+predictor_k_lateral: 0.3
+predictor_k_s: 1.5
+predictor_k_heading: 0.3
+predictor_k_v: 3.0
+predictor_k_a: 1.0
+predictor_k_kappa: 0.5
+predictor_stable_k: 0.0
+
+# controller（轨迹调整策略）
+controller_type: mlp_norm
+controller_dropout: 0.0
+controller_max_range: 0.5
+controller_hidden_dim: 256
+controller_hidden_depth: 4
+controller_lr: 0.001
+controller_max_norm: 2
+controller_T_max: 0.0
+controller_discount: 0.98
+controller_train_horizon: 9   # controller rollout步数，独立于predictor（上限 = horizon = 9）
+controller_smooth_k: 1.0
+controller_stable_k: 0.0
+controller_k_lateral: 0.0
+controller_k_s: 1.5
+controller_k_heading: 0.0
+controller_k_v: 3.0
+controller_k_a: 1.5
+controller_k_kappa: 0.0
+
+# Training ------------------------------
+batch_size: 8192
+predictor_epochs: 50
+controller_epochs: 200
+
+# Data ----------------------------------
+data_step: 0.1
+traj_duration: 2.0
+traj_points: 20  # traj_duration / data_step
