@@ -65,6 +65,7 @@ def train():
     # ── 第一阶段：训练 predictor ────────────────────────────────────────────
     log(f'\n=== 训练 Predictor（{cfg.predictor_epochs} epochs）===', log_file)
     log(f'参数量: {predictor.total_params}', log_file)
+    log(f'device: {predictor.device}', log_file)
 
     for e in range(1, cfg.predictor_epochs + 1):
         t0 = time.time()
