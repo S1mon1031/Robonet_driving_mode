@@ -41,7 +41,7 @@ def train():
                     f'{fp} 不存在，请先运行:\n'
                     f'  python3 -m offline_train.data_process --csv <your.csv> --outdir {d}')
 
-    container = Container(data_dirs, cfg.batch_size)
+    container = Container(data_dirs, cfg.batch_size, device=cfg.device)
     predictor  = Predictor(cfg)
     controller = Controller(cfg)
 
