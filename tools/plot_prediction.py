@@ -111,7 +111,7 @@ def rollout(predictor, state_seq, target_seq, context_seq, des_xy, des_heading, 
         for k in range(H):
             next_target = torch.tensor(
                 target_seq[H + k + 1], dtype=torch.float32).unsqueeze(0).to(device)
-            next_state, _ = predictor.predict(
+            next_state, _, _hx = predictor.predict(
                 state, previous_state, target, previous_target, next_target, context)
 
             s = next_state.squeeze(0).cpu().numpy()

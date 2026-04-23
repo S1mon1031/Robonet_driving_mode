@@ -151,7 +151,7 @@ class Controller(nn.Module):
             next_real_target = future_real_target[:, 0, :]
             next_target = next_real_target + delta
 
-            next_state, _ = predictor.predict(
+            next_state, _, _hx = predictor.predict(
                 state, previous_state, target, previous_target, next_target, context_seq)
 
             loss, mae = self.compute_loss(next_state, next_real_target)

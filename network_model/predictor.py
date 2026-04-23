@@ -82,32 +82,41 @@ class Predictor(nn.Module):
     def total_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def predict(self, state, previous_state, target, previous_target, next_target, context):
+    def predict(self, state, previous_state, target, previous_target, next_target, context,
+                hx=None):
         """
         Args:
             state:          (batch, state_dim)
-            previous_state: (batch, horizon, state_dim)
+            previous_state: (batch, horizon, state_dim)  — LSTM模式rollout时可传 None
             target:         (batch, target_dim)
-            previous_target:(batch, horizon, target_dim)
+            previous_target:(batch, horizon, target_dim) — LSTM模式rollout时可传 None
             next_target:    (batch, target_dim)
-            context:        (batch, context_dim)  — (pitch, load)
+            context:        (batch, context_dim)
+            hx:             (h_n, c_n) LSTM hidden state，rollout时传入上步输出，None则从头算
         Returns:
             next_state:  (batch, state_dim)
             delta_state: (batch, state_dim)
+            hx_out:      (h_n, c_n) 仅 LSTM 模式有效，MLP 模式返回 None
         """
         if isinstance(self._predictor, LSTMNet):
-            # 序列：历史 H 步 state || target  (batch, H, state_dim+target_dim)
-            seq = torch.cat([previous_state, previous_target], dim=-1)
-            # extra：当前 state + target + next_target + context
             extra = torch.cat([state, target, next_target, context], dim=-1)
-            delta_state = self.max_range * self._predictor(seq, extra)
+            if hx is not None:
+                # rollout：只送当前一步作为序列输入，复用 hidden state
+                cur_feat = torch.cat([state, target], dim=-1).unsqueeze(1)  # (B,1,feat)
+                delta_state, hx_out = self._predictor(cur_feat, extra, hx=hx)
+            else:
+                # 初始步：用完整历史序列初始化 hidden state
+                seq = torch.cat([previous_state, previous_target], dim=-1)  # (B,H,feat)
+                delta_state, hx_out = self._predictor(seq, extra, hx=None)
+            delta_state = self.max_range * delta_state
         else:
             prev_s = previous_state.view(previous_state.shape[0], -1)
             prev_t = previous_target.view(previous_target.shape[0], -1)
             x = torch.cat([prev_s, state, prev_t, target, next_target, context], dim=-1)
             delta_state = self.max_range * self._predictor(x)
+            hx_out = None
         next_state = state + delta_state
-        return next_state, delta_state
+        return next_state, delta_state, hx_out
 
     def compute_loss(self, next_state_pred, next_state_real):
         """分别对六个维度加权计算MSE损失"""
@@ -148,10 +157,12 @@ class Predictor(nn.Module):
         total_loss, stable_loss = 0, 0
         time_step_metrics = {'lat': [], 's': [], 'head': [], 'v': [], 'a': [], 'kappa': [], 'avg': []}
 
+        hx = None  # LSTM hidden state，第一步从历史序列初始化，后续复用
         for k in range(self.train_horizon):
             next_target = target_seq[:, self.horizon + k + 1, :]
-            next_state_pred, delta = self.predict(
-                state, previous_state, target, previous_target, next_target, context_seq)
+            next_state_pred, delta, hx = self.predict(
+                state, previous_state, target, previous_target, next_target, context_seq,
+                hx=hx)
             next_state_real = state_seq[:, self.horizon + k + 1, :]
 
             loss, mae = self.compute_loss(next_state_pred, next_state_real)
@@ -167,7 +178,7 @@ class Predictor(nn.Module):
                 time_step_metrics['avg'].append(float(mae.mean()))
 
             if self.k_stable != 0 and base_predictor is not None:
-                _, base_delta = base_predictor.predict(
+                _, base_delta, _ = base_predictor.predict(
                     state, previous_state, target, previous_target, next_target, context_seq)
                 stable_loss = stable_loss + F.mse_loss(delta, base_delta.detach()) * self.k_stable
 

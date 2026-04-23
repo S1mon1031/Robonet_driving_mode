@@ -74,7 +74,7 @@ def rollout_baseline(predictor, state_seq, target_seq, context_seq, horizon):
         for k in range(horizon):
             next_target = torch.tensor(
                 target_seq[H + k + 1], dtype=torch.float32).unsqueeze(0).to(device)
-            next_state, _ = predictor.predict(
+            next_state, _, _hx = predictor.predict(
                 state, previous_state, target, previous_target, next_target, context)
 
             pred_states.append(next_state.squeeze(0).cpu().numpy())
@@ -119,7 +119,7 @@ def rollout_with_controller(predictor, controller, state_seq, target_seq, contex
             else:
                 next_target = next_real_target
 
-            next_state, _ = predictor.predict(
+            next_state, _, _hx = predictor.predict(
                 state, previous_state, target, previous_target, next_target, context)
 
             pred_states.append(next_state.squeeze(0).cpu().numpy())

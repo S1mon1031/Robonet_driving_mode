@@ -114,16 +114,17 @@ class LSTMNet(nn.Module):
             layers.append(nn.Tanh())
         self.head = nn.Sequential(*layers)
 
-    def forward(self, seq_input, extra_input=None):
+    def forward(self, seq_input, extra_input=None, hx=None):
         """
         seq_input  : (batch, seq_len, seq_feat_dim)
         extra_input: (batch, extra_dim) 或 None
-        返回        : (batch, out_dim)
+        hx         : (h_0, c_0) 或 None，用于 rollout 时传入上一步 hidden state
+        返回        : output (batch, out_dim), (h_n, c_n)
         """
-        _, (h_n, _) = self.lstm(seq_input)   # h_n: (num_layers, batch, hidden)
-        h_last = h_n[-1]                      # (batch, hidden)
+        _, (h_n, c_n) = self.lstm(seq_input, hx)  # h_n: (num_layers, batch, hidden)
+        h_last = h_n[-1]                            # (batch, hidden)
         if extra_input is not None:
             x = torch.cat([h_last, extra_input], dim=-1)
         else:
             x = h_last
-        return self.head(x)
+        return self.head(x), (h_n, c_n)
