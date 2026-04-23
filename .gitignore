@@ -4,7 +4,6 @@ data/
 # 模型权重
 state_dict/
 *.pt
-*.pth
 *.ckpt
 
 #日志文件
