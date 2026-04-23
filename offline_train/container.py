@@ -13,10 +13,10 @@ class TruckDataset(Dataset):
     """
 
     def __init__(self, data_dir):
-        self.state       = torch.load(os.path.join(data_dir, 'state.pt'))
-        self.target      = torch.load(os.path.join(data_dir, 'target.pt'))
-        self.real_target = torch.load(os.path.join(data_dir, 'real_target.pt'))
-        self.context     = torch.load(os.path.join(data_dir, 'context.pt'))
+        self.state       = torch.load(os.path.join(data_dir, 'state.pt'),       mmap=True)
+        self.target      = torch.load(os.path.join(data_dir, 'target.pt'),      mmap=True)
+        self.real_target = torch.load(os.path.join(data_dir, 'real_target.pt'), mmap=True)
+        self.context     = torch.load(os.path.join(data_dir, 'context.pt'),     mmap=True)
         assert self.state.shape[0] == self.target.shape[0] == self.context.shape[0]
         self.total_length = self.state.shape[0]
 

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from network_model.network import mlp, mlp_norm
+from network_model.network import mlp, mlp_norm, LSTMNet
 from network_model.weight_init import weight_init
 from offline_train.container import Container
 
@@ -16,6 +16,11 @@ class Predictor(nn.Module):
 
     输入: 历史H步state + 当前state + 历史H步target + 当前target + 下一步target + context
     输出: delta_state，next_state = state + delta_state
+
+    predictor_type:
+      mlp / mlp_norm : 将所有输入展平拼接后送入 MLP
+      lstm           : 历史序列 (prev_state||prev_target) 送 LSTM，
+                       当前 state/target/next_target/context 作 extra 拼接解码头
     """
 
     def __init__(self, cfg):
@@ -47,6 +52,21 @@ class Predictor(nn.Module):
             self._predictor = mlp_norm(predict_dim,
                                        cfg.predictor_hidden_depth * [cfg.predictor_hidden_dim],
                                        cfg.state_dim, cfg.predictor_dropout, tanh_out=True)
+        elif cfg.predictor_type == 'lstm':
+            # 序列输入：历史 H 步，每步 = state(6) || target(3)
+            seq_feat_dim = cfg.state_dim + cfg.target_dim
+            # extra 输入：当前 state + 当前 target + 下一步 target + context
+            extra_dim = cfg.state_dim + cfg.target_dim + cfg.target_dim + cfg.context_dim
+            self._predictor = LSTMNet(
+                seq_feat_dim  = seq_feat_dim,
+                extra_dim     = extra_dim,
+                lstm_hidden   = cfg.lstm_hidden_size,
+                lstm_layers   = cfg.lstm_num_layers,
+                mlp_dims      = cfg.lstm_head_dim,
+                out_dim       = cfg.state_dim,
+                dropout       = cfg.predictor_dropout,
+                tanh_out      = True,
+            )
         else:
             raise ValueError(f'Unknown predictor type: {cfg.predictor_type}')
 
@@ -75,10 +95,17 @@ class Predictor(nn.Module):
             next_state:  (batch, state_dim)
             delta_state: (batch, state_dim)
         """
-        prev_s = previous_state.view(previous_state.shape[0], -1)
-        prev_t = previous_target.view(previous_target.shape[0], -1)
-        x = torch.cat([prev_s, state, prev_t, target, next_target, context], dim=-1)
-        delta_state = self.max_range * self._predictor(x)
+        if isinstance(self._predictor, LSTMNet):
+            # 序列：历史 H 步 state || target  (batch, H, state_dim+target_dim)
+            seq = torch.cat([previous_state, previous_target], dim=-1)
+            # extra：当前 state + target + next_target + context
+            extra = torch.cat([state, target, next_target, context], dim=-1)
+            delta_state = self.max_range * self._predictor(seq, extra)
+        else:
+            prev_s = previous_state.view(previous_state.shape[0], -1)
+            prev_t = previous_target.view(previous_target.shape[0], -1)
+            x = torch.cat([prev_s, state, prev_t, target, next_target, context], dim=-1)
+            delta_state = self.max_range * self._predictor(x)
         next_state = state + delta_state
         return next_state, delta_state
 

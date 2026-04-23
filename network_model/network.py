@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 
@@ -71,3 +72,58 @@ def mlp(in_dim, mlp_dims, out_dim, tanh_out=False):
         net.append(nn.Tanh())
 
     return nn.Sequential(*net)
+
+
+class LSTMNet(nn.Module):
+    """
+    LSTM 编码器 + MLP 解码头。
+
+    输入分两路：
+      seq_input  : (batch, seq_len, seq_feat_dim)  — 时序部分（历史状态+历史目标）
+      extra_input: (batch, extra_dim)              — 非时序部分（当前状态/目标/context）
+
+    内部流程：
+      1. LSTM 处理 seq_input，取最后时刻隐状态 h_n[-1]
+      2. 将 h_n 与 extra_input 拼接
+      3. MLP 解码头输出结果
+    """
+
+    def __init__(self, seq_feat_dim, extra_dim, lstm_hidden, lstm_layers,
+                 mlp_dims, out_dim, dropout=0.0, tanh_out=False):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=seq_feat_dim,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            batch_first=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+        )
+        mlp_in = lstm_hidden + extra_dim
+        if isinstance(mlp_dims, int):
+            mlp_dims = [mlp_dims]
+        dims = [mlp_in] + mlp_dims + [out_dim]
+        layers = []
+        for i in range(len(dims) - 2):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if dropout > 0 and i == 0:
+                layers.append(nn.Dropout(dropout))
+            layers.append(nn.LayerNorm(dims[i + 1]))
+            layers.append(nn.ELU())
+        layers.append(nn.Linear(dims[-2], dims[-1]))
+        if tanh_out:
+            layers.append(nn.Tanh())
+        self.head = nn.Sequential(*layers)
+
+    def forward(self, seq_input, extra_input=None):
+        """
+        seq_input  : (batch, seq_len, seq_feat_dim)
+        extra_input: (batch, extra_dim) 或 None
+        返回        : (batch, out_dim)
+        """
+        _, (h_n, _) = self.lstm(seq_input)   # h_n: (num_layers, batch, hidden)
+        h_last = h_n[-1]                      # (batch, hidden)
+        if extra_input is not None:
+            x = torch.cat([h_last, extra_input], dim=-1)
+        else:
+            x = h_last
+        return self.head(x)

@@ -276,14 +276,19 @@ def process_row(row, csv_traj_points=20):
             np.array(context, dtype=np.float32))   # (CONTEXT_DIM,)
 
 
-def build_sequences(all_states, all_targets, all_contexts, horizon, traj_points=None):
+def build_sequences(all_states, all_targets, all_contexts, horizon, traj_points=None, stride=1):
     """
     将每条轨迹的时间步序列，构建滑动窗口训练样本
 
-    对于第 i 条轨迹的第 j 步（horizon <= j < traj_points - horizon）：
+    对于第 i 条轨迹的第 j 步（horizon <= j < traj_points - horizon，步长 stride）：
       state_seq:   steps [j-H, ..., j, ..., j+H]  (2H+1, state_dim)
       target_seq:  steps [j-H, ..., j, ..., j+2H-1] (3H, target_dim)
       context:     当前行的 context                  (context_dim,)
+
+    stride > 1 可显著减少样本数（相邻样本重叠度降低），适用于 horizon 小、样本/轨迹多的情况。
+    例：traj_points=100, horizon=30, stride=1 → 40条/轨迹
+                                      stride=5 → 8条/轨迹
+                                      stride=10 → 4条/轨迹
     """
     if traj_points is None:
         traj_points = TRAJ_POINTS
@@ -295,7 +300,7 @@ def build_sequences(all_states, all_targets, all_contexts, horizon, traj_points=
         T = all_targets[i]   # (traj_points, target_dim)
         C = all_contexts[i]  # (context_dim,)
 
-        for j in range(H, traj_points - H):
+        for j in range(H, traj_points - H, stride):
             state_seq  = S[j - H: j + H + 1]          # (2H+1, state_dim)
             target_seq = T[max(0, j - H): j + 2 * H]  # (3H, target_dim)
 
@@ -425,11 +430,15 @@ def main():
                              '如 --traj_duration 2.0→20, 5.0→50, 10.0→100（默认20）')
     parser.add_argument('--horizon', '-hz', type=int, default=HORIZON,
                         help=f'滑动窗口半径，需与 config.yaml 的 horizon 一致（默认{HORIZON}）')
+    parser.add_argument('--stride', '-s', type=int, default=1,
+                        help='滑动窗口步长，>1 可减少冗余样本（默认1）'
+                             '  例：horizon=30 时 stride=10 → 4条样本/轨迹')
     args = parser.parse_args()
 
     traj_points     = args.traj_points
     csv_traj_points = args.csv_traj_points
     horizon         = args.horizon
+    stride          = args.stride
 
     if traj_points < csv_traj_points:
         raise ValueError(f'--traj_points({traj_points}) 不能小于 --csv_traj_points({csv_traj_points})')
@@ -458,7 +467,7 @@ def main():
     print(f'合计 {len(all_states)} 条有效轨迹，跳过 {total_skip} 条')
 
     state_arr, target_arr, real_target_arr, context_arr = build_sequences(
-        all_states, all_targets, all_contexts, horizon, traj_points)
+        all_states, all_targets, all_contexts, horizon, traj_points, stride)
 
     print(f'生成训练样本: {state_arr.shape[0]}')
     print(f'  state_seq:       {state_arr.shape}')
