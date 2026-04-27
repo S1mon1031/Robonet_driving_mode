@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from network_model.network import mlp, mlp_norm, LSTMNet
+from network_model.network import mlp, mlp_norm, LSTMNet, LSTMNetPlus
 from network_model.weight_init import weight_init
 from offline_train.container import Container
 
@@ -52,12 +52,13 @@ class Predictor(nn.Module):
             self._predictor = mlp_norm(predict_dim,
                                        cfg.predictor_hidden_depth * [cfg.predictor_hidden_dim],
                                        cfg.state_dim, cfg.predictor_dropout, tanh_out=True)
-        elif cfg.predictor_type == 'lstm':
+        elif cfg.predictor_type in ('lstm', 'lstm_plus'):
             # 序列输入：历史 H 步，每步 = state(6) || target(3)
             seq_feat_dim = cfg.state_dim + cfg.target_dim
             # extra 输入：当前 state + 当前 target + 下一步 target + context
             extra_dim = cfg.state_dim + cfg.target_dim + cfg.target_dim + cfg.context_dim
-            self._predictor = LSTMNet(
+            cls = LSTMNetPlus if cfg.predictor_type == 'lstm_plus' else LSTMNet
+            self._predictor = cls(
                 seq_feat_dim  = seq_feat_dim,
                 extra_dim     = extra_dim,
                 lstm_hidden   = cfg.lstm_hidden_size,
@@ -98,7 +99,7 @@ class Predictor(nn.Module):
             delta_state: (batch, state_dim)
             hx_out:      (h_n, c_n) 仅 LSTM 模式有效，MLP 模式返回 None
         """
-        if isinstance(self._predictor, LSTMNet):
+        if isinstance(self._predictor, (LSTMNet, LSTMNetPlus)):
             extra = torch.cat([state, target, next_target, context], dim=-1)
             if hx is not None:
                 # rollout：只送当前一步作为序列输入，复用 hidden state
@@ -205,5 +206,6 @@ class Predictor(nn.Module):
         torch.save({'predictor': self.state_dict()}, fp)
 
     def load(self, fp):
-        state_dict = fp if isinstance(fp, dict) else torch.load(fp, weights_only=True)
+        state_dict = fp if isinstance(fp, dict) else torch.load(
+            fp, weights_only=True, map_location=self.device)
         self.load_state_dict(state_dict['predictor'])

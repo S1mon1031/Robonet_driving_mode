@@ -1,19 +1,9 @@
 
-# 矿车轨迹跟踪模型配置（10s 轨迹，horizon=30，LSTM predictor 版本）
-# state:   (lateral_error, s_error, heading_error, v, a, kappa)  6维
-# target:  (v_ref, a_ref, kappa_ref)                             3维，来自planning
-# context: (pitch, load)                                         2维，坡度+负载
-#
-# 与 config_10s_h30.yaml (mlp_norm) 的区别：
-#   predictor_type: lstm
-#   LSTM 序列输入: (batch, H=30, state_dim+target_dim=9)  历史3s
-#   LSTM extra 输入: state(6) + target(3) + next_target(3) + context(2) = 14
-#   LSTM hidden: 256，layers: 2，head_dim: 256
-#   参数量估算: ~900K（vs mlp_norm ~470K），但序列建模能力更强
-#
-# 梯度分析：
-#   LSTM cell state 加法更新 c_t = f·c_{t-1} + i·g
-#   类似 ResNet skip，梯度高速路，rollout 训练时梯度消失更慢
+# 矿车轨迹跟踪模型配置（10s 轨迹，horizon=30，LSTMPlus predictor 版本）
+# 相比 lstm 版本的升级：
+#   1. seq_input 进 LSTM 前加 InputLayerNorm，稳定序列输入分布
+#   2. 解码头改用 mlp_norm（NormedLinear: Linear→Dropout→LayerNorm→ELU）
+#   3. 保留 hx 传递，rollout 时单步复用 hidden state
 
 # Model -------------------------------
 device: cpu
@@ -23,15 +13,14 @@ context_dim: 2    # pitch(rad), load(0=轻载/1=重载)
 horizon: 30       # 历史窗口长度（H=30 → 3s 历史序列）
 train_horizon: 30 # predictor 训练展开步数（3s rollout）
 
-# predictor（LSTM 闭环动力学模型）
-predictor_type: lstm
+# predictor（LSTMPlus 闭环动力学模型）
+predictor_type: lstm_plus
 predictor_dropout: 0.1
 predictor_max_range: 1.0
-# lstm 专用参数（mlp_norm 的 hidden_dim/depth 对 lstm 无效）
 lstm_hidden_size: 256
 lstm_num_layers: 2
 lstm_head_dim: 256
-# 以下参数 lstm 模式下不使用，保留以兼容 parser
+# 以下参数 lstm_plus 模式下不使用，保留以兼容 parser
 predictor_hidden_dim: 256
 predictor_hidden_depth: 4
 predictor_lr: 0.0001
@@ -70,8 +59,8 @@ controller_k_kappa: 0.0
 batch_size: 4096
 predictor_epochs: 200
 controller_epochs: 0
-save_dir: state_dict/10s_h30_lstm
-log_dir: logs/10s_h30_lstm
+save_dir: state_dict/10s_h30_lstm_plus
+log_dir: logs/10s_h30_lstm_plus
 
 # Data ----------------------------------
 data_step: 0.1

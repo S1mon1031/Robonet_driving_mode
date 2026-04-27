@@ -185,11 +185,28 @@ def read_bag_data(bag_path, traj_duration=5.0):
                 elif abs(field_a - 1.2) < 0.1:
                     load_value = 0
 
+            # 从 debug.simple_lon_debug 提取 preview 纵向参考
+            lon_dbg = control_msg.debug.simple_lon_debug
+            preview_speed_ref  = lon_dbg.preview_speed_reference
+            preview_accel_ref  = lon_dbg.preview_acceleration_reference
+            preview_station    = lon_dbg.preview_station_error
+            preview_ref_x      = lon_dbg.preview_reference_point.path_point.x
+            preview_ref_y      = lon_dbg.preview_reference_point.path_point.y
+
+            # 从 debug.simple_lat_debug 提取曲率
+            curvature = control_msg.debug.simple_lat_debug.curvature
+
             control_list.append({
                 'timestamp': control_msg.header.timestamp_sec,
                 'control_throttle': control_msg.throttle,
                 'control_brake': control_msg.brake,
                 'load': load_value,
+                'preview_speed_reference': preview_speed_ref,
+                'preview_acceleration_reference': preview_accel_ref,
+                'preview_station_error': preview_station,
+                'preview_ref_x': preview_ref_x,
+                'preview_ref_y': preview_ref_y,
+                'curvature': curvature,
             })
 
         elif channel_name == PLANNING_TOPIC:
@@ -358,17 +375,6 @@ def process_data(loc_list, plan_list, chassis_list, control_list, writer, traj_d
         control_idx = find_closest_index(control_list, plan_ts)
         control = control_list[control_idx] if control_idx >= 0 else None
 
-        # 匹配期望轨迹到自车位置
-        matched_desired_traj = match_desired_trajectory_to_vehicle(
-            desired_traj, loc['pos_x'], loc['pos_y'], traj_duration)
-
-        if not matched_desired_traj:
-            continue
-
-        # 截断到固定点数
-        n_traj_points = int(round(traj_duration / 0.1))
-        matched_desired_traj = matched_desired_traj[:n_traj_points]
-
         # 获取响应轨迹
         response_traj = get_response_trajectory(loc_list, loc_idx, plan_ts, traj_duration)
 
@@ -410,10 +416,25 @@ def process_data(loc_list, plan_list, chassis_list, control_list, writer, traj_d
         else:
             row.extend([0.0, 0.0, 0])
 
-        # 期望轨迹（匹配后的轨迹）
+        # 期望轨迹：v/a/s/x/y/kappa 来自对应时刻 control debug 的 preview 字段
+        n_traj_points = int(round(traj_duration / 0.1))
         desired_data = []
-        for tp in matched_desired_traj:
-            desired_data.extend([tp['x'], tp['y'], tp['s'], tp['v'], tp['a'], tp['kappa']])
+        for i in range(n_traj_points):
+            # 该轨迹点对应的时间戳
+            tp_ts = plan_ts + (i + 1) * 0.1
+            ctrl_i_idx = find_closest_index(control_list, tp_ts)
+            ctrl_i = control_list[ctrl_i_idx] if ctrl_i_idx >= 0 else None
+            if ctrl_i:
+                desired_data.extend([
+                    ctrl_i['preview_ref_x'],
+                    ctrl_i['preview_ref_y'],
+                    ctrl_i['preview_station_error'],
+                    ctrl_i['preview_speed_reference'],
+                    ctrl_i['preview_acceleration_reference'],
+                    ctrl_i['curvature'],
+                ])
+            else:
+                desired_data.extend([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
         # 响应轨迹（实际位姿）
         response_data = []
