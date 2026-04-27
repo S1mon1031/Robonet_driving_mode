@@ -52,13 +52,28 @@ class Predictor(nn.Module):
             self._predictor = mlp_norm(predict_dim,
                                        cfg.predictor_hidden_depth * [cfg.predictor_hidden_dim],
                                        cfg.state_dim, cfg.predictor_dropout, tanh_out=True)
-        elif cfg.predictor_type in ('lstm', 'lstm_plus'):
+        elif cfg.predictor_type == 'lstm':
             # 序列输入：历史 H 步，每步 = state(6) || target(3)
             seq_feat_dim = cfg.state_dim + cfg.target_dim
             # extra 输入：当前 state + 当前 target + 下一步 target + context
             extra_dim = cfg.state_dim + cfg.target_dim + cfg.target_dim + cfg.context_dim
-            cls = LSTMNetPlus if cfg.predictor_type == 'lstm_plus' else LSTMNet
-            self._predictor = cls(
+            self._predictor = LSTMNet(
+                seq_feat_dim  = seq_feat_dim,
+                extra_dim     = extra_dim,
+                lstm_hidden   = cfg.lstm_hidden_size,
+                lstm_layers   = cfg.lstm_num_layers,
+                mlp_dims      = cfg.lstm_head_dim,
+                out_dim       = cfg.state_dim,
+                dropout       = cfg.predictor_dropout,
+                tanh_out      = True,
+            )
+        elif cfg.predictor_type == 'lstm_plus':
+            # 与参考版本(0415)完全一致：
+            # 序列输入：历史H步 + 当前步，长度 H+1，每步 = state(6) || target(3)
+            # extra 输入：next_target(3) + context(2) = 5维
+            seq_feat_dim = cfg.state_dim + cfg.target_dim
+            extra_dim = cfg.target_dim + cfg.context_dim
+            self._predictor = LSTMNetPlus(
                 seq_feat_dim  = seq_feat_dim,
                 extra_dim     = extra_dim,
                 lstm_hidden   = cfg.lstm_hidden_size,
@@ -99,7 +114,15 @@ class Predictor(nn.Module):
             delta_state: (batch, state_dim)
             hx_out:      (h_n, c_n) 仅 LSTM 模式有效，MLP 模式返回 None
         """
-        if isinstance(self._predictor, (LSTMNet, LSTMNetPlus)):
+        if isinstance(self._predictor, LSTMNetPlus):
+            # 参考版本：seq = [prev_state; state] || [prev_target; target]，长度 H+1
+            state_seq  = torch.cat([previous_state,  state.unsqueeze(1)],  dim=1)
+            target_seq = torch.cat([previous_target, target.unsqueeze(1)], dim=1)
+            seq   = torch.cat([state_seq, target_seq], dim=-1)   # (B, H+1, 9)
+            extra = torch.cat([next_target, context], dim=-1)    # (B, 5)
+            delta_state = self.max_range * self._predictor(seq, extra)
+            hx_out = None
+        elif isinstance(self._predictor, LSTMNet):
             extra = torch.cat([state, target, next_target, context], dim=-1)
             if hx is not None:
                 # rollout：只送当前一步作为序列输入，复用 hidden state
