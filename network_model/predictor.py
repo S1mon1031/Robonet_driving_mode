@@ -115,13 +115,18 @@ class Predictor(nn.Module):
             hx_out:      (h_n, c_n) 仅 LSTM 模式有效，MLP 模式返回 None
         """
         if isinstance(self._predictor, LSTMNetPlus):
-            # 参考版本：seq = [prev_state; state] || [prev_target; target]，长度 H+1
-            state_seq  = torch.cat([previous_state,  state.unsqueeze(1)],  dim=1)
-            target_seq = torch.cat([previous_target, target.unsqueeze(1)], dim=1)
-            seq   = torch.cat([state_seq, target_seq], dim=-1)   # (B, H+1, 9)
-            extra = torch.cat([next_target, context], dim=-1)    # (B, 5)
-            delta_state = self.max_range * self._predictor(seq, extra)
-            hx_out = None
+            extra = torch.cat([next_target, context], dim=-1)   # (B, 5)
+            if hx is not None:
+                # rollout：只送当前一步，复用 hidden state
+                cur_feat = torch.cat([state, target], dim=-1).unsqueeze(1)  # (B,1,9)
+                delta_state, hx_out = self._predictor(cur_feat, extra, hx=hx)
+            else:
+                # 初始步：完整序列 [prev_state; state] || [prev_target; target]，长度 H+1
+                state_seq  = torch.cat([previous_state,  state.unsqueeze(1)],  dim=1)
+                target_seq = torch.cat([previous_target, target.unsqueeze(1)], dim=1)
+                seq = torch.cat([state_seq, target_seq], dim=-1)  # (B, H+1, 9)
+                delta_state, hx_out = self._predictor(seq, extra, hx=None)
+            delta_state = self.max_range * delta_state
         elif isinstance(self._predictor, LSTMNet):
             extra = torch.cat([state, target, next_target, context], dim=-1)
             if hx is not None:

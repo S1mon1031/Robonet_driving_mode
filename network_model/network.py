@@ -106,14 +106,14 @@ class LSTMNetPlus(nn.Module):
             layers.append(nn.Tanh())
         self.head = nn.Sequential(*layers)
 
-    def forward(self, seq_input, extra_input=None):
-        _, (h_n, _) = self.lstm(seq_input)
+    def forward(self, seq_input, extra_input=None, hx=None):
+        _, (h_n, c_n) = self.lstm(seq_input, hx)
         h_last = h_n[-1]
         if extra_input is not None:
             x = torch.cat([h_last, extra_input], dim=-1)
         else:
             x = h_last
-        return self.head(x)
+        return self.head(x), (h_n, c_n)
 
 
 class LSTMNet(nn.Module):
