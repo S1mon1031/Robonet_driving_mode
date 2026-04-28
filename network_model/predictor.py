@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from network_model.network import mlp, mlp_norm, LSTMNet, LSTMNetPlus
+from network_model.network import mlp, mlp_norm, LSTMNet, LSTMNetPlus, TCNNet
 from network_model.weight_init import weight_init
 from offline_train.container import Container
 
@@ -83,6 +83,23 @@ class Predictor(nn.Module):
                 dropout       = cfg.predictor_dropout,
                 tanh_out      = True,
             )
+        elif cfg.predictor_type == 'tcn':
+            # 序列输入：历史H步 + 当前步，长度 H+1，每步 = state(6) || target(3)
+            # extra 输入：next_target(3) + context(2) = 5维（与 lstm_plus 相同）
+            # TCN 无 hidden state，rollout 时每步均需完整序列
+            seq_feat_dim = cfg.state_dim + cfg.target_dim
+            extra_dim    = cfg.target_dim + cfg.context_dim
+            tcn_channels = cfg.tcn_num_levels * [cfg.tcn_num_channels]
+            self._predictor = TCNNet(
+                seq_feat_dim = seq_feat_dim,
+                extra_dim    = extra_dim,
+                tcn_channels = tcn_channels,
+                kernel_size  = cfg.tcn_kernel_size,
+                mlp_dims     = cfg.tcn_head_dim,
+                out_dim      = cfg.state_dim,
+                dropout      = cfg.predictor_dropout,
+                tanh_out     = True,
+            )
         else:
             raise ValueError(f'Unknown predictor type: {cfg.predictor_type}')
 
@@ -138,6 +155,15 @@ class Predictor(nn.Module):
                 seq = torch.cat([previous_state, previous_target], dim=-1)  # (B,H,feat)
                 delta_state, hx_out = self._predictor(seq, extra, hx=None)
             delta_state = self.max_range * delta_state
+        elif isinstance(self._predictor, TCNNet):
+            # TCN 无 hidden state，每步均需完整 H+1 序列
+            extra = torch.cat([next_target, context], dim=-1)              # (B, 5)
+            state_seq  = torch.cat([previous_state,  state.unsqueeze(1)],  dim=1)  # (B, H+1, 6)
+            target_seq = torch.cat([previous_target, target.unsqueeze(1)], dim=1)  # (B, H+1, 3)
+            seq = torch.cat([state_seq, target_seq], dim=-1)               # (B, H+1, 9)
+            delta_state = self._predictor(seq, extra)
+            delta_state = self.max_range * delta_state
+            hx_out = None
         else:
             prev_s = previous_state.view(previous_state.shape[0], -1)
             prev_t = previous_target.view(previous_target.shape[0], -1)
@@ -213,6 +239,10 @@ class Predictor(nn.Module):
 
             previous_state  = self.sequence_update(previous_state, state)
             previous_target = self.sequence_update(previous_target, target)
+            # TCN 无 hx：对滑入历史窗口的状态做 detach，截断跨步梯度链，避免 OOM
+            if isinstance(self._predictor, TCNNet):
+                previous_state  = previous_state.detach()
+                previous_target = previous_target.detach()
             state  = next_state_pred
             target = next_target
 

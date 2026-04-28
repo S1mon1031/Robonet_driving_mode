@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from pytorch_tcn import TCN
 
 
 """
@@ -170,3 +171,60 @@ class LSTMNet(nn.Module):
         else:
             x = h_last
         return self.head(x), (h_n, c_n)
+
+class TCNNet(nn.Module):
+    """
+    TCN 编码器 + MLP 解码头。
+
+    输入分两路：
+      seq_input  : (batch, seq_len, seq_feat_dim) — 时序部分（历史状态+历史目标）
+      extra_input: (batch, extra_dim)              — 非时序部分（next_target + context）
+
+    内部流程：
+      1. TCN 处理 seq_input（转置为 channel-first），取最后时刻输出
+      2. 将 TCN 输出与 extra_input 拼接
+      3. MLP 解码头输出结果
+
+    注意：TCN 是非自回归模型，无 hidden state，不支持单步 rollout 复用（每次需完整序列）。
+    """
+
+    def __init__(self, seq_feat_dim, extra_dim, tcn_channels, kernel_size,
+                 mlp_dims, out_dim, dropout=0.0, tanh_out=False):
+        super().__init__()
+        if isinstance(tcn_channels, int):
+            tcn_channels = [tcn_channels]
+        self.tcn = TCN(
+            num_inputs=seq_feat_dim,
+            num_channels=tcn_channels,
+            kernel_size=kernel_size,
+            dropout=dropout,
+        )
+        tcn_out_dim = tcn_channels[-1]
+        mlp_in = tcn_out_dim + extra_dim
+        if isinstance(mlp_dims, int):
+            mlp_dims = [mlp_dims]
+        dims = [mlp_in] + mlp_dims + [out_dim]
+        layers = []
+        for i in range(len(dims) - 2):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if dropout > 0 and i == 0:
+                layers.append(nn.Dropout(dropout))
+            layers.append(nn.LayerNorm(dims[i + 1]))
+            layers.append(nn.ELU())
+        layers.append(nn.Linear(dims[-2], dims[-1]))
+        if tanh_out:
+            layers.append(nn.Tanh())
+        self.head = nn.Sequential(*layers)
+
+    def forward(self, seq_input, extra_input=None):
+        """
+        seq_input  : (batch, seq_len, seq_feat_dim)
+        extra_input: (batch, extra_dim) 或 None
+        返回        : output (batch, out_dim)
+        """
+        x = seq_input.transpose(1, 2)   # → (batch, seq_feat_dim, seq_len)
+        x = self.tcn(x)                  # → (batch, tcn_channels[-1], seq_len)
+        x = x[:, :, -1]                  # 取最后时刻输出 → (batch, tcn_channels[-1])
+        if extra_input is not None:
+            x = torch.cat([x, extra_input], dim=-1)
+        return self.head(x)
