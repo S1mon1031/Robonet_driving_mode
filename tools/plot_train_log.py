@@ -40,7 +40,7 @@ def parse_logs(log_paths):
     in_ctrl = False
 
     for path in sorted(log_paths):
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
 
         file_pred = []
