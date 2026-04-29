@@ -119,82 +119,96 @@ class Controller(nn.Module):
 
         self.optim.zero_grad(set_to_none=True)
         self.train()
-        for p in predictor.parameters():
-            p.requires_grad = False
 
-        state           = state_seq[:, self.horizon, :]
-        previous_state  = state_seq[:, :self.horizon, :]
-        target          = target_seq[:, self.horizon, :]
-        previous_target = target_seq[:, :self.horizon, :]
-        future_real_target = real_target_seq[:, self.horizon:(self.horizon * 2), :]
+        # Predictor 需要参与计算图以便梯度传回 controller 输入（next_target），
+        # 对于 cuDNN LSTM，backward 要求前向发生在 train mode。
+        predictor_was_training = predictor.training
+        predictor_param_requires_grad = [p.requires_grad for p in predictor.parameters()]
 
-        track_loss = torch.tensor(0.0, device=self.device)
-        smooth_loss = torch.tensor(0.0, device=self.device)
-        stable_loss = torch.tensor(0.0, device=self.device)
-        time_step_metrics = {'dv': [], 'da': [], 'dkappa': [], 'mae_avg': []}
+        try:
+            predictor.train()
+            for p in predictor.parameters():
+                p.requires_grad_(False)
 
-        # 一次性输出1s内所有步的delta
-        delta_targets = self.control(
-            state, previous_state, target, previous_target, future_real_target, context_seq)
-        # delta_targets: (batch, train_horizon, target_dim)
+            state           = state_seq[:, self.horizon, :]
+            previous_state  = state_seq[:, :self.horizon, :]
+            target          = target_seq[:, self.horizon, :]
+            previous_target = target_seq[:, :self.horizon, :]
+            future_real_target = real_target_seq[:, self.horizon:(self.horizon * 2), :]
 
-        if self.k_stable != 0 and base_controller is not None:
-            base_delta_targets = base_controller.control(
+            track_loss = torch.tensor(0.0, device=self.device)
+            smooth_loss = torch.tensor(0.0, device=self.device)
+            stable_loss = torch.tensor(0.0, device=self.device)
+            time_step_metrics = {'dv': [], 'da': [], 'dkappa': [], 'mae_avg': []}
+
+            # 一次性输出1s内所有步的delta
+            delta_targets = self.control(
                 state, previous_state, target, previous_target, future_real_target, context_seq)
-            stable_loss = F.mse_loss(delta_targets, base_delta_targets.detach()) * self.k_stable
+            # delta_targets: (batch, train_horizon, target_dim)
 
-        for k in range(self.train_horizon):
-            future_real_target = self.sequence_update(
-                future_real_target, real_target_seq[:, self.horizon * 2 + k, :])
+            if self.k_stable != 0 and base_controller is not None:
+                base_delta_targets = base_controller.control(
+                    state, previous_state, target, previous_target, future_real_target, context_seq)
+                stable_loss = F.mse_loss(delta_targets, base_delta_targets.detach()) * self.k_stable
 
-            delta = delta_targets[:, k, :]
-            next_real_target = future_real_target[:, 0, :]
-            next_target = next_real_target + delta
+            for k in range(self.train_horizon):
+                future_real_target = self.sequence_update(
+                    future_real_target, real_target_seq[:, self.horizon * 2 + k, :])
 
-            next_state, _, _hx = predictor.predict(
-                state, previous_state, target, previous_target, next_target, context_seq)
+                delta = delta_targets[:, k, :]
+                next_real_target = future_real_target[:, 0, :]
+                next_target = next_real_target + delta
 
-            loss, mae = self.compute_loss(next_state, next_real_target)
-            track_loss = track_loss + (self.discount ** k) * loss
+                next_state, _, _hx = predictor.predict(
+                    state, previous_state, target, previous_target, next_target, context_seq)
 
-            # 相邻步delta平滑loss
-            if k > 0:
-                smooth_loss = smooth_loss + F.mse_loss(
-                    delta_targets[:, k, :], delta_targets[:, k - 1, :]) * self.k_smooth
+                loss, mae = self.compute_loss(next_state, next_real_target)
+                track_loss = track_loss + (self.discount ** k) * loss
 
-            if epoch_end:
-                time_step_metrics['dv'].append(float(delta[:, 0].abs().mean()))
-                time_step_metrics['da'].append(float(delta[:, 1].abs().mean()))
-                time_step_metrics['dkappa'].append(float(delta[:, 2].abs().mean()))
-                time_step_metrics['mae_avg'].append(float(mae.mean()))
+                # 相邻步delta平滑loss
+                if k > 0:
+                    smooth_loss = smooth_loss + F.mse_loss(
+                        delta_targets[:, k, :], delta_targets[:, k - 1, :]) * self.k_smooth
 
-            previous_state  = self.sequence_update(previous_state, state)
-            previous_target = self.sequence_update(previous_target, target)
-            state  = next_state
-            target = next_target
+                if epoch_end:
+                    time_step_metrics['dv'].append(float(delta[:, 0].abs().mean()))
+                    time_step_metrics['da'].append(float(delta[:, 1].abs().mean()))
+                    time_step_metrics['dkappa'].append(float(delta[:, 2].abs().mean()))
+                    time_step_metrics['mae_avg'].append(float(mae.mean()))
 
-        total_loss = (track_loss + smooth_loss + stable_loss) / self.train_horizon
-        total_loss.backward()
-        if self.max_norm != 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_norm)
-        else:
-            grad_norm = 0
-        self.optim.step()
-        if self.scheduler:
-            self.scheduler.step()
+                previous_state  = self.sequence_update(previous_state, state)
+                previous_target = self.sequence_update(previous_target, target)
+                state  = next_state
+                target = next_target
 
-        self.eval()
-        for p in predictor.parameters():
-            p.requires_grad = True
-        self.iteration += 1
+            total_loss = (track_loss + smooth_loss + stable_loss) / self.train_horizon
+            total_loss.backward()
+            if self.max_norm != 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_norm)
+            else:
+                grad_norm = 0
+            self.optim.step()
+            if self.scheduler:
+                self.scheduler.step()
 
-        metrics = {
-            'track_loss':  float(track_loss.item() / self.train_horizon),
-            'smooth_loss': float(smooth_loss.item() / self.train_horizon),
-            'total_loss':  float(total_loss.item()),
-            'grad_norm':   float(grad_norm),
-        }
-        return epoch_end, metrics, time_step_metrics
+            self.iteration += 1
+
+            metrics = {
+                'track_loss':  float(track_loss.item() / self.train_horizon),
+                'smooth_loss': float(smooth_loss.item() / self.train_horizon),
+                'total_loss':  float(total_loss.item()),
+                'grad_norm':   float(grad_norm),
+            }
+            return epoch_end, metrics, time_step_metrics
+        finally:
+            # 无论成功或异常，都恢复 predictor 原状态，避免污染外部流程
+            for p, req in zip(predictor.parameters(), predictor_param_requires_grad):
+                p.requires_grad_(req)
+            if predictor_was_training:
+                predictor.train()
+            else:
+                predictor.eval()
+            self.eval()
 
     def save(self, fp):
         torch.save({'controller': self.state_dict()}, fp)
