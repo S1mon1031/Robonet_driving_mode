@@ -47,11 +47,11 @@ def parse_logs(log_paths):
         file_ctrl = []
 
         for line in lines:
-            if '训练 Predictor' in line:
+            if 'Predictor' in line and 'epochs' in line:
                 in_pred = True
                 in_ctrl = False
                 continue
-            if '训练 Controller' in line:
+            if 'Controller' in line and 'epochs' in line:
                 in_pred = False
                 in_ctrl = True
                 continue
@@ -109,7 +109,6 @@ def plot(pred_rows, ctrl_rows, out_path):
         ax2 = ax.twinx()
 
         ax.plot(epochs, loss, 'b-o', markersize=3, label='loss')
-        ax2.plot(epochs, lat,  'r--s', markersize=3, alpha=0.7, label='lat MAE')
         ax2.plot(epochs, s,    'g--^', markersize=3, alpha=0.7, label='s MAE')
         ax2.plot(epochs, v,    'm--D', markersize=3, alpha=0.7, label='v MAE')
         ax2.plot(epochs, a,    'c--x', markersize=3, alpha=0.7, label='a MAE')
