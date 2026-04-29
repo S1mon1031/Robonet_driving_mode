@@ -24,7 +24,7 @@ RE_PRED = re.compile(
     r'Epoch\s+(\d+).*?loss=([\d.]+).*?grad=([\d.]+).*?'
     r'lat=([\d.]+)\s+s=([\d.]+)\s+v=([\d.]+)\s+a=([\d.]+)'
 )
-# Controller: [xx:xx:xx] Epoch    1 (xs) | track=0.0012 smooth=0.0003 total=0.0015 | dv=0.1234 da=0.0234 dkappa=0.0123
+# Controller: [xx:xx:xx] Epoch    1 (xs) | track=0.0012 smooth=0.0003 total=0.0015 | dv=0.1234 da=0.0234 ds=0.0123
 RE_CTRL = re.compile(
     r'Epoch\s+(\d+).*?track=([\d.]+)\s+smooth=([\d.]+)\s+total=([\d.]+)'
 )

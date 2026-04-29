@@ -102,7 +102,7 @@ def train():
         msg = (f'[{now}] Epoch {e:4d} ({elapsed:.1f}s) | track={metrics["track_loss"]:.4f} '
                f'smooth={metrics["smooth_loss"]:.4f} '
                f'total={metrics["total_loss"]:.4f}'
-               + (f' | dv={tsm["dv"][-1]:.4f} da={tsm["da"][-1]:.4f} dkappa={tsm["dkappa"][-1]:.4f}' if tsm["dv"] else ''))
+               + (f' | dv={tsm["dv"][-1]:.4f} da={tsm["da"][-1]:.4f} ds={tsm["ds"][-1]:.4f}' if tsm["dv"] else ''))
         log(msg, log_file)
 
         if e % 10 == 0:

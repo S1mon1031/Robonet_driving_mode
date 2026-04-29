@@ -139,7 +139,7 @@ class Controller(nn.Module):
             track_loss = torch.tensor(0.0, device=self.device)
             smooth_loss = torch.tensor(0.0, device=self.device)
             stable_loss = torch.tensor(0.0, device=self.device)
-            time_step_metrics = {'dv': [], 'da': [], 'dkappa': [], 'mae_avg': []}
+            time_step_metrics = {'dv': [], 'da': [], 'ds': [], 'mae_avg': []}
 
             # 一次性输出1s内所有步的delta
             delta_targets = self.control(
@@ -173,7 +173,7 @@ class Controller(nn.Module):
                 if epoch_end:
                     time_step_metrics['dv'].append(float(delta[:, 0].abs().mean()))
                     time_step_metrics['da'].append(float(delta[:, 1].abs().mean()))
-                    time_step_metrics['dkappa'].append(float(delta[:, 2].abs().mean()))
+                    time_step_metrics['ds'].append(float(next_state[:, 1].abs().mean()))
                     time_step_metrics['mae_avg'].append(float(mae.mean()))
 
                 previous_state  = self.sequence_update(previous_state, state)
