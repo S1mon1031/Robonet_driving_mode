@@ -214,5 +214,6 @@ class Controller(nn.Module):
         torch.save({'controller': self.state_dict()}, fp)
 
     def load(self, fp):
-        state_dict = fp if isinstance(fp, dict) else torch.load(fp, weights_only=True)
+        state_dict = fp if isinstance(fp, dict) else torch.load(
+            fp, weights_only=True, map_location=self.device)
         self.load_state_dict(state_dict['controller'])

@@ -327,6 +327,7 @@ def plot_html(rows, pred_states, H, save_path, stride, roll_x_v=None, roll_y_v=N
 
     actual_v = np.array([r['cur_v'] for r in rows])
     actual_a = np.array([r['cur_a'] for r in rows])
+    pitch    = np.array([r['pitch'] for r in rows])
     des_v0   = np.array([r['des'][0]['v'] for r in rows])
     des_a0   = np.array([r['des'][0]['a'] for r in rows])
 
@@ -341,10 +342,11 @@ def plot_html(rows, pred_states, H, save_path, stride, roll_x_v=None, roll_y_v=N
     print(f'规划轨迹线条数: {n_plan}（stride={stride}）')
 
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=3, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.08,
-        subplot_titles=['Velocity (m/s)', 'Acceleration (m/s²)'],
+        vertical_spacing=0.06,
+        row_heights=[0.4, 0.4, 0.2],
+        subplot_titles=['Velocity (m/s)', 'Acceleration (m/s²)', 'Pitch (°)'],
     )
 
     # ── 速度子图 ─────────────────────────────────────────────────────────────
@@ -372,7 +374,6 @@ def plot_html(rows, pred_states, H, save_path, stride, roll_x_v=None, roll_y_v=N
         name='Predicted v (1-step)',
     ), row=1, col=1)
 
-    # 滚动短期闭环预测（若有）
     if roll_x_v is not None:
         fig.add_trace(go.Scatter(
             x=roll_x_v, y=roll_y_v,
@@ -432,6 +433,19 @@ def plot_html(rows, pred_states, H, save_path, stride, roll_x_v=None, roll_y_v=N
 
     fig.add_hline(y=0, line=dict(color='gray', width=1, dash='dot'), row=2, col=1)
 
+    # ── 坡度子图 ─────────────────────────────────────────────────────────────
+    pitch_deg = np.degrees(pitch)
+    fig.add_trace(go.Scatter(
+        x=t.tolist(), y=pitch_deg.tolist(),
+        mode='lines',
+        line=dict(color='rgba(0,150,136,0.9)', width=1.5),
+        name='Pitch (°)',
+        fill='tozeroy',
+        fillcolor='rgba(0,150,136,0.08)',
+    ), row=3, col=1)
+
+    fig.add_hline(y=0, line=dict(color='gray', width=1, dash='dot'), row=3, col=1)
+
     sim_start = float(t[H + 1])
     fig.add_vline(x=sim_start,
                   line=dict(color='green', width=1.5, dash='dot'),
@@ -440,11 +454,11 @@ def plot_html(rows, pred_states, H, save_path, stride, roll_x_v=None, roll_y_v=N
 
     fig.update_layout(
         title=dict(
-            text='Velocity & Acceleration — Actual / Planned / Predicted',
+            text='Velocity & Acceleration & Pitch — Actual / Planned / Predicted',
             font=dict(size=16),
             x=0.5,
         ),
-        height=750,
+        height=900,
         hovermode='x unified',
         legend=dict(
             orientation='h',
@@ -455,9 +469,10 @@ def plot_html(rows, pred_states, H, save_path, stride, roll_x_v=None, roll_y_v=N
         template='plotly_white',
         margin=dict(l=60, r=30, t=80, b=50),
     )
-    fig.update_xaxes(title_text='Time (s)', row=2, col=1)
+    fig.update_xaxes(title_text='Time (s)', row=3, col=1)
     fig.update_yaxes(title_text='Velocity (m/s)',      row=1, col=1)
     fig.update_yaxes(title_text='Acceleration (m/s²)', row=2, col=1)
+    fig.update_yaxes(title_text='Pitch (°)',            row=3, col=1)
 
     fig.write_html(
         save_path,
