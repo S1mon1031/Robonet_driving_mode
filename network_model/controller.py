@@ -11,10 +11,11 @@ from offline_train.container import Container
 
 class Controller(nn.Module):
     """
-    轨迹调整策略：一次性输出1s内（train_horizon步）所有时间步的target调整量
+    轨迹调整策略：每步独立输出当前时刻的target调整量（参考 EfficientTrack/论文 Algorithm 1）
     输入: 历史H步state + 当前state + 历史H步target + 当前target + 未来H步real_target + context
-    输出: delta_targets，shape (batch, train_horizon, target_dim)
-         adjusted_target[k] = real_target[k] + delta_targets[k]
+    输出: delta_target，shape (batch, target_dim)
+         adjusted_target = real_target[0] + delta_target
+    训练时在 train_horizon 步上做多步展开，梯度通过 predictor 回传。
     """
 
     def __init__(self, cfg):
@@ -38,8 +39,8 @@ class Controller(nn.Module):
         controller_dim = ((cfg.horizon + 1) * cfg.state_dim
                           + (2 * cfg.horizon + 1) * cfg.target_dim
                           + cfg.context_dim)
-        # 输出维度: train_horizon * target_dim（1s内所有步的delta）
-        output_dim = self.train_horizon * cfg.target_dim
+        # 输出维度: target_dim（单步delta）
+        output_dim = cfg.target_dim
 
         if cfg.controller_type == 'mlp':
             self._controller = mlp(controller_dim,
@@ -67,7 +68,7 @@ class Controller(nn.Module):
 
     def control(self, state, previous_state, target, previous_target, future_real_target, context):
         """
-        一次性输出1s内所有步的delta_target
+        单步输出当前时刻的 delta_target（对应论文 Algorithm 1 第 41 行）
         Args:
             state:              (batch, state_dim)
             previous_state:     (batch, horizon, state_dim)
@@ -76,16 +77,19 @@ class Controller(nn.Module):
             future_real_target: (batch, horizon, target_dim)  未来H步planning目标
             context:            (batch, context_dim)
         Returns:
-            delta_targets: (batch, train_horizon, target_dim)
+            next_target:  (batch, target_dim)  adjusted_target = real_target[0] + delta_target
+            delta_target: (batch, target_dim)
         """
+        next_real_target = future_real_target[:, 0, :]
+
         prev_s = previous_state.view(previous_state.shape[0], -1)
         prev_t = previous_target.view(previous_target.shape[0], -1)
         fut_t  = future_real_target.reshape(future_real_target.shape[0], -1)
 
         x = torch.cat([prev_s, state, prev_t, target, fut_t, context], dim=-1)
-        out = self.max_range * self._controller(x)  # (batch, train_horizon * target_dim)
-        delta_targets = out.view(out.shape[0], self.train_horizon, -1)  # (batch, train_horizon, target_dim)
-        return delta_targets
+        delta_target = self.max_range * self._controller(x)  # (batch, target_dim)
+        next_target = next_real_target + delta_target
+        return next_target, delta_target
 
     def compute_loss(self, next_state_pred, next_real_target):
         """
@@ -140,24 +144,15 @@ class Controller(nn.Module):
             smooth_loss = torch.tensor(0.0, device=self.device)
             stable_loss = torch.tensor(0.0, device=self.device)
             time_step_metrics = {'dv': [], 'da': [], 'ds': [], 'mae_avg': []}
-
-            # 一次性输出1s内所有步的delta
-            delta_targets = self.control(
-                state, previous_state, target, previous_target, future_real_target, context_seq)
-            # delta_targets: (batch, train_horizon, target_dim)
-
-            if self.k_stable != 0 and base_controller is not None:
-                base_delta_targets = base_controller.control(
-                    state, previous_state, target, previous_target, future_real_target, context_seq)
-                stable_loss = F.mse_loss(delta_targets, base_delta_targets.detach()) * self.k_stable
+            last_delta_target = None
 
             for k in range(self.train_horizon):
                 future_real_target = self.sequence_update(
                     future_real_target, real_target_seq[:, self.horizon * 2 + k, :])
 
-                delta = delta_targets[:, k, :]
+                next_target, delta_target = self.control(
+                    state, previous_state, target, previous_target, future_real_target, context_seq)
                 next_real_target = future_real_target[:, 0, :]
-                next_target = next_real_target + delta
 
                 next_state, _, _hx = predictor.predict(
                     state, previous_state, target, previous_target, next_target, context_seq)
@@ -165,14 +160,22 @@ class Controller(nn.Module):
                 loss, mae = self.compute_loss(next_state, next_real_target)
                 track_loss = track_loss + (self.discount ** k) * loss
 
-                # 相邻步delta平滑loss
+                # 相邻步delta平滑loss（对应论文公式10的 L_reg）
                 if k > 0:
                     smooth_loss = smooth_loss + F.mse_loss(
-                        delta_targets[:, k, :], delta_targets[:, k - 1, :]) * self.k_smooth
+                        delta_target, last_delta_target) * self.k_smooth
+                last_delta_target = delta_target
+
+                # 稳定loss：与 base_controller 保持接近
+                if self.k_stable != 0 and base_controller is not None:
+                    _, base_delta = base_controller.control(
+                        state, previous_state, target, previous_target, future_real_target, context_seq)
+                    stable_loss = stable_loss + F.mse_loss(
+                        delta_target, base_delta.detach()) * self.k_stable
 
                 if epoch_end:
-                    time_step_metrics['dv'].append(float(delta[:, 0].abs().mean()))
-                    time_step_metrics['da'].append(float(delta[:, 1].abs().mean()))
+                    time_step_metrics['dv'].append(float(delta_target[:, 0].abs().mean()))
+                    time_step_metrics['da'].append(float(delta_target[:, 1].abs().mean()))
                     time_step_metrics['ds'].append(float(next_state[:, 1].abs().mean()))
                     time_step_metrics['mae_avg'].append(float(mae.mean()))
 
