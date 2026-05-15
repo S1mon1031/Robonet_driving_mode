@@ -1,17 +1,19 @@
 """
 validate.py
-使用验证集 CSV 评估已训练的 Predictor 效果
+使用验证集 CSV 评估已训练的 Predictor（及可选 Controller）效果
 
 使用方法：
   cd /apollo/modules/MiningTruckTrack
-  python3 -m offline_train.validate --csv /path/to/val/*.csv --config config_10s_h30_lstm.yaml --model state_dict/predictor_final.pth
+  # 只验证 predictor
+  python3 -m offline_train.validate --csv /path/to/val/*.csv --config config_10s_h30_lstm.yaml --model predictor.pth
+  # 同时验证 controller
+  python3 -m offline_train.validate --csv /path/to/val/*.csv --config config_10s_h30_lstm.yaml --model predictor.pth --controller controller.pth
 """
 
 import os
 import sys
 import csv
 import argparse
-import math
 import numpy as np
 import torch
 
@@ -19,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from network_model.parser import parse_config
 from network_model.predictor import Predictor
+from network_model.controller import Controller
 from offline_train.data_process import (
     process_row, build_sequences,
     LAT_MIN, LAT_MAX, S_MIN, S_MAX,
@@ -26,11 +29,6 @@ from offline_train.data_process import (
     A_MIN, A_MAX, KAPPA_MIN, KAPPA_MAX,
     HORIZON, TRAJ_POINTS,
 )
-
-
-# 反归一化：norm ∈ [-1,1] → real
-def denormalize(x, xmin, xmax):
-    return (x + 1.0) * (xmax - xmin) / 2.0 + xmin
 
 
 # 各维度反归一化参数
@@ -48,7 +46,7 @@ def load_csv(csv_path):
     rows = []
     with open(csv_path, 'r') as f:
         reader = csv.reader(f)
-        header = next(reader, None)
+        next(reader, None)
         for row in reader:
             if row:
                 rows.append(row)
@@ -78,34 +76,29 @@ def process_csv_files(csv_paths, csv_traj_points=20):
 
 def rollout(predictor, state_seq, target_seq, context_seq, hist_horizon, rollout_steps):
     """
-    对单条样本做闭环预测
-    state_seq:  (2H+1, 6)
-    target_seq: (3H,   3)
-    context_seq:(2,)
+    无 controller 的闭环预测（predictor 直接用 real target）
     返回 pred_states: (rollout_steps, 6) — 归一化空间
     """
     device = predictor.device
     H = hist_horizon
 
-    # 当前帧为中心点
-    state          = torch.tensor(state_seq[H],    dtype=torch.float32).unsqueeze(0).to(device)
-    previous_state = torch.tensor(state_seq[:H],   dtype=torch.float32).unsqueeze(0).to(device)
-    target         = torch.tensor(target_seq[H],   dtype=torch.float32).unsqueeze(0).to(device)
-    previous_target= torch.tensor(target_seq[:H],  dtype=torch.float32).unsqueeze(0).to(device)
-    context        = torch.tensor(context_seq,     dtype=torch.float32).unsqueeze(0).to(device)
+    state           = torch.tensor(state_seq[H],   dtype=torch.float32).unsqueeze(0).to(device)
+    previous_state  = torch.tensor(state_seq[:H],  dtype=torch.float32).unsqueeze(0).to(device)
+    target          = torch.tensor(target_seq[H],  dtype=torch.float32).unsqueeze(0).to(device)
+    previous_target = torch.tensor(target_seq[:H], dtype=torch.float32).unsqueeze(0).to(device)
+    context         = torch.tensor(context_seq,    dtype=torch.float32).unsqueeze(0).to(device)
 
     pred_states = []
     with torch.no_grad():
         for k in range(rollout_steps):
             next_target = torch.tensor(
                 target_seq[H + k + 1], dtype=torch.float32).unsqueeze(0).to(device)
-            next_state, _, _hx = predictor.predict(
+            next_state, _, _ = predictor.predict(
                 state, previous_state, target, previous_target, next_target, context)
 
             pred_states.append(next_state.squeeze(0).cpu().numpy())
 
-            # 滚动窗口
-            previous_state = torch.cat([previous_state[:, 1:, :], state.unsqueeze(1)], dim=1)
+            previous_state  = torch.cat([previous_state[:, 1:, :], state.unsqueeze(1)], dim=1)
             previous_target = torch.cat([previous_target[:, 1:, :], target.unsqueeze(1)], dim=1)
             state  = next_state
             target = next_target
@@ -113,19 +106,113 @@ def rollout(predictor, state_seq, target_seq, context_seq, hist_horizon, rollout
     return np.array(pred_states)  # (rollout_steps, 6)
 
 
+def rollout_with_controller(predictor, controller, state_seq, target_seq, context_seq,
+                             hist_horizon, rollout_steps):
+    """
+    有 controller 的闭环预测：每步用 controller 调整 next_target 后再交给 predictor
+    返回 pred_states: (rollout_steps, 6) — 归一化空间
+    """
+    device = predictor.device
+    H = hist_horizon
+
+    state           = torch.tensor(state_seq[H],   dtype=torch.float32).unsqueeze(0).to(device)
+    previous_state  = torch.tensor(state_seq[:H],  dtype=torch.float32).unsqueeze(0).to(device)
+    target          = torch.tensor(target_seq[H],  dtype=torch.float32).unsqueeze(0).to(device)
+    previous_target = torch.tensor(target_seq[:H], dtype=torch.float32).unsqueeze(0).to(device)
+    context         = torch.tensor(context_seq,    dtype=torch.float32).unsqueeze(0).to(device)
+
+    pred_states = []
+    with torch.no_grad():
+        for k in range(rollout_steps):
+            # 未来 H 步 real target（超出末尾时用最后一步填充）
+            fut_indices = [min(H + k + 1 + h, len(target_seq) - 1) for h in range(H)]
+            future_real_target = torch.tensor(
+                np.array([target_seq[idx] for idx in fut_indices], dtype=np.float32),
+                dtype=torch.float32).unsqueeze(0).to(device)  # (1, H, 3)
+
+            next_target, _ = controller.control(
+                state, previous_state, target, previous_target, future_real_target, context)
+            next_target = torch.clamp(next_target, -1.0, 1.0)
+
+            next_state, _, _ = predictor.predict(
+                state, previous_state, target, previous_target, next_target, context)
+
+            pred_states.append(next_state.squeeze(0).cpu().numpy())
+
+            previous_state  = torch.cat([previous_state[:, 1:, :], state.unsqueeze(1)], dim=1)
+            previous_target = torch.cat([previous_target[:, 1:, :], target.unsqueeze(1)], dim=1)
+            state  = next_state
+            target = next_target
+
+    return np.array(pred_states)  # (rollout_steps, 6)
+
+
+def _print_table(label, N, train_horizon, mae_per_step, mae_avg):
+    dim_names = [d[3] for d in DENORM]
+    print(f'\n{"="*76}')
+    print(f'{label}（{N} 个样本，{train_horizon} 步，每步 0.1s）')
+    print(f'{"="*76}')
+    header = f'{"step":>6}' + ''.join(f'{n:>11}' for n in dim_names)
+    print(header)
+    print('-' * len(header))
+    for step in range(train_horizon):
+        t = (step + 1) * 0.1
+        row = [f'{t:.1f}s']
+        for dim_i, (xmin, xmax, unit, _) in enumerate(DENORM):
+            row.append(f'{mae_per_step[step, dim_i] * (xmax - xmin) / 2.0:.4f}{unit}')
+        print(f'{"":>6}' + ''.join(f'{p:>11}' for p in row))
+    print('-' * len(header))
+    avg = ['avg']
+    for dim_i, (xmin, xmax, unit, _) in enumerate(DENORM):
+        avg.append(f'{mae_avg[dim_i] * (xmax - xmin) / 2.0:.4f}{unit}')
+    print(f'{"":>6}' + ''.join(f'{p:>11}' for p in avg))
+    print(f'{"="*76}')
+
+
+def build_ideal_refs(target_seq, H, rollout_steps, state_dim):
+    """
+    构造理想参考状态（normalized空间）：
+    [lat_err=0, s_err=0, head_err=0, v=v_ref, a=a_ref, kappa=kappa_ref]
+    target_seq: (T, 3) normalized，每行 [v_ref, a_ref, kappa_ref]
+    """
+    def norm_zero(xmin, xmax):
+        return (0.0 - xmin) / (xmax - xmin) * 2.0 - 1.0
+
+    lat_zero  = norm_zero(LAT_MIN,  LAT_MAX)
+    s_zero    = norm_zero(S_MIN,    S_MAX)
+    head_zero = norm_zero(HEAD_MIN, HEAD_MAX)
+
+    ideal = np.zeros((rollout_steps, state_dim), dtype=np.float32)
+    for k in range(rollout_steps):
+        t_idx = min(H + k + 1, len(target_seq) - 1)
+        ideal[k, 0] = lat_zero
+        ideal[k, 1] = s_zero
+        ideal[k, 2] = head_zero
+        ideal[k, 3] = target_seq[t_idx, 0]  # v_ref
+        ideal[k, 4] = target_seq[t_idx, 1]  # a_ref
+        ideal[k, 5] = target_seq[t_idx, 2]  # kappa_ref
+    return ideal
+
+
 def validate(args):
     root = os.path.dirname(os.path.dirname(__file__))
     cfg = parse_config(os.path.join(root, args.config))
 
-    print(f'\n加载模型: {args.model}')
+    print(f'\n加载 Predictor: {args.model}')
     predictor = Predictor(cfg)
     predictor.load(args.model)
     predictor.eval()
 
+    controller = None
+    if args.controller:
+        print(f'加载 Controller: {args.controller}')
+        controller = Controller(cfg)
+        controller.load(args.controller)
+        controller.eval()
+
     print(f'\n读取验证 CSV...')
     csv_traj_points = getattr(cfg, 'traj_points', 20)
-    csv_paths = args.csv
-    all_states, all_targets, all_contexts = process_csv_files(csv_paths, csv_traj_points)
+    all_states, all_targets, all_contexts = process_csv_files(args.csv, csv_traj_points)
 
     print(f'\n构建验证样本...')
     stride = getattr(args, 'stride', 1)
@@ -134,72 +221,88 @@ def validate(args):
         traj_points=csv_traj_points, stride=stride)
     N = len(state_seqs)
     print(f'共 {N} 个验证样本')
+    if N == 0:
+        print('无有效样本，退出')
+        return
 
-    # ── 逐样本预测 ─────────────────────────────────────────────────────────
     H = cfg.horizon
-    all_mae_norm = np.zeros((N, cfg.train_horizon, cfg.state_dim), dtype=np.float32)
+    all_mae_norm  = np.zeros((N, cfg.train_horizon, cfg.state_dim), dtype=np.float32)
+    all_mae_ctrl  = np.zeros((N, cfg.train_horizon, cfg.state_dim), dtype=np.float32) \
+                    if controller else None
 
+    print('\n开始评估...')
     for i in range(N):
+        if (i + 1) % 500 == 0:
+            print(f'  {i + 1}/{N}')
+        ideal = build_ideal_refs(target_seqs[i], H, cfg.train_horizon, cfg.state_dim)
+
         pred = rollout(predictor, state_seqs[i], target_seqs[i], context_seqs[i],
-                       cfg.horizon, cfg.train_horizon)
-        real = state_seqs[i, H + 1: H + 1 + cfg.train_horizon, :]  # (train_horizon, 6)
-        all_mae_norm[i] = np.abs(pred - real)
+                       H, cfg.train_horizon)
+        all_mae_norm[i] = np.abs(pred - ideal)
 
-    # ── 按步统计 MAE ────────────────────────────────────────────────────────
-    # mean over samples: (train_horizon, state_dim)
+        if controller is not None:
+            pred_c = rollout_with_controller(
+                predictor, controller, state_seqs[i], target_seqs[i], context_seqs[i],
+                H, cfg.train_horizon)
+            all_mae_ctrl[i] = np.abs(pred_c - ideal)
+
     mae_per_step = all_mae_norm.mean(axis=0)
-    mae_avg      = all_mae_norm.mean(axis=(0, 1))  # (state_dim,)
+    mae_avg      = all_mae_norm.mean(axis=(0, 1))
 
-    print(f'\n{"="*70}')
-    print(f'验证结果（{N} 个样本，{cfg.train_horizon} 步预测，每步 0.1s）')
-    print(f'{"="*70}')
+    _print_table('无 Controller（开环预测）', N, cfg.train_horizon, mae_per_step, mae_avg)
 
-    # 表头
-    dim_names = [d[3] for d in DENORM]
-    dim_units = [d[2] for d in DENORM]
-    header = f'{"step":>5}' + ''.join(f'{n:>12}' for n in dim_names)
-    print(header)
-    print('-' * len(header))
+    if controller is not None:
+        mae_per_step_c = all_mae_ctrl.mean(axis=0)
+        mae_avg_c      = all_mae_ctrl.mean(axis=(0, 1))
+        _print_table('有 Controller（闭环预测）', N, cfg.train_horizon, mae_per_step_c, mae_avg_c)
 
-    for step in range(cfg.train_horizon):
-        t = (step + 1) * 0.1
-        row_parts = [f'{t:.1f}s']
-        for dim_i, (xmin, xmax, unit, name) in enumerate(DENORM):
-            mae_real = mae_per_step[step, dim_i] * (xmax - xmin) / 2.0
-            row_parts.append(f'{mae_real:.4f}{unit}')
-        print(f'{"":>5}' + ''.join(f'{p:>12}' for p in row_parts))
+        # 对比摘要
+        dim_names = [d[3] for d in DENORM]
+        print(f'\n{"="*76}')
+        print('对比摘要：有 Controller vs 无 Controller（MAE 变化，负数=改善）')
+        print(f'{"="*76}')
+        header = f'{"step":>6}' + ''.join(f'{n:>11}' for n in dim_names)
+        print(header)
+        print('-' * len(header))
+        for step in range(cfg.train_horizon):
+            t = (step + 1) * 0.1
+            row = [f'{t:.1f}s']
+            for dim_i, (xmin, xmax, unit, _) in enumerate(DENORM):
+                scale = (xmax - xmin) / 2.0
+                diff = (mae_per_step_c[step, dim_i] - mae_per_step[step, dim_i]) * scale
+                row.append(f'{diff:+.4f}{unit}')
+            print(f'{"":>6}' + ''.join(f'{p:>11}' for p in row))
+        print(f'{"="*76}')
 
-    print('-' * len(header))
-    avg_parts = ['avg']
-    for dim_i, (xmin, xmax, unit, name) in enumerate(DENORM):
-        mae_real = mae_avg[dim_i] * (xmax - xmin) / 2.0
-        avg_parts.append(f'{mae_real:.4f}{unit}')
-    print(f'{"":>5}' + ''.join(f'{p:>12}' for p in avg_parts))
-    print(f'{"="*70}')
-
-    # ── 保存结果 ────────────────────────────────────────────────────────────
+    # 保存 CSV
     if args.save:
-        out_path = args.save
-        with open(out_path, 'w') as f:
-            f.write('step,' + ','.join(dim_names) + '\n')
+        dim_names = [d[3] for d in DENORM]
+        with open(args.save, 'w') as f:
+            cols = ['step'] + dim_names
+            if controller is not None:
+                cols += [n + '_ctrl' for n in dim_names]
+            f.write(','.join(cols) + '\n')
             for step in range(cfg.train_horizon):
                 t = (step + 1) * 0.1
                 vals = [f'{t:.1f}']
-                for dim_i, (xmin, xmax, unit, _) in enumerate(DENORM):
-                    mae_real = mae_per_step[step, dim_i] * (xmax - xmin) / 2.0
-                    vals.append(f'{mae_real:.6f}')
+                for dim_i, (xmin, xmax, _, __) in enumerate(DENORM):
+                    vals.append(f'{mae_per_step[step, dim_i] * (xmax - xmin) / 2.0:.6f}')
+                if controller is not None:
+                    for dim_i, (xmin, xmax, _, __) in enumerate(DENORM):
+                        vals.append(f'{mae_per_step_c[step, dim_i] * (xmax - xmin) / 2.0:.6f}')
                 f.write(','.join(vals) + '\n')
-        print(f'\n结果已保存到 {out_path}')
+        print(f'\n结果已保存到 {args.save}')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv',   nargs='+', required=True, help='验证集 CSV 文件')
+    parser.add_argument('--csv',        nargs='+', required=True, help='验证集 CSV 文件')
     parser.add_argument('--config', '-c', type=str, default='config.yaml',
-                        help='配置文件路径，相对于项目根目录，如 config_10s_h30_lstm.yaml')
-    parser.add_argument('--model', required=True,            help='predictor 权重路径')
-    parser.add_argument('--save',  type=str, default=None,   help='将逐步 MAE 保存为 CSV')
-    parser.add_argument('--stride', type=int, default=1,
+                        help='配置文件路径，相对于项目根目录')
+    parser.add_argument('--model',      required=True,           help='predictor 权重路径')
+    parser.add_argument('--controller', type=str, default=None,  help='controller 权重路径（可选）')
+    parser.add_argument('--save',       type=str, default=None,  help='将逐步 MAE 保存为 CSV')
+    parser.add_argument('--stride',     type=int, default=1,
                         help='验证样本滑窗步长，>1 可减少样本数（默认 1）')
     args = parser.parse_args()
     validate(args)

@@ -313,11 +313,9 @@ def run_rolling_horizon(predictor, states, targets, contexts, H,
                     fut_c = torch.tensor(fut,      dtype=torch.float32).unsqueeze(0).to(device)
                     ctx_c = torch.tensor(contexts[start], dtype=torch.float32).unsqueeze(0).to(device)
 
-                    delta_targets = controller.control(sn_c, ps_c, tn_c, pt_c, fut_c, ctx_c)
-                    # control() 一次性输出 controller_train_horizon 步，这里取第0步用于当前步
-                    delta = delta_targets[:, 0, :].squeeze(0)
-                    tnx_c = tn_c.squeeze(0) + delta
-                    tnx_c = torch.clamp(tnx_c, -1.0, 1.0).unsqueeze(0)
+                    tnx_c, delta = controller.control(sn_c, ps_c, tn_c, pt_c, fut_c, ctx_c)
+                    delta = delta.squeeze(0)
+                    tnx_c = torch.clamp(tnx_c, -1.0, 1.0)
 
                     next_s_c, _, _ = predictor.predict(sn_c, ps_c, tn_c, pt_c, tnx_c, ctx_c)
                     ns_c = next_s_c.squeeze(0).cpu().numpy()
