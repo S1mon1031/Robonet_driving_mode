@@ -27,6 +27,7 @@ class Controller(nn.Module):
         self.k_smooth = cfg.controller_smooth_k
         self.max_range = cfg.controller_max_range
         self.k_stable = cfg.controller_stable_k
+        self.k_delta = getattr(cfg, 'controller_delta_k', 0.1)
         self.k_lateral = cfg.controller_k_lateral
         self.k_s       = cfg.controller_k_s
         self.k_heading = cfg.controller_k_heading
@@ -143,6 +144,7 @@ class Controller(nn.Module):
             track_loss = torch.tensor(0.0, device=self.device)
             smooth_loss = torch.tensor(0.0, device=self.device)
             stable_loss = torch.tensor(0.0, device=self.device)
+            delta_loss = torch.tensor(0.0, device=self.device)
             time_step_metrics = {'dv': [], 'da': [], 'ds': [], 'mae_avg': []}
             last_delta_target = None
 
@@ -166,6 +168,10 @@ class Controller(nn.Module):
                         delta_target, last_delta_target) * self.k_smooth
                 last_delta_target = delta_target
 
+                # delta 幅值惩罚：避免长期输出贴近上界的大修正
+                if self.k_delta != 0:
+                    delta_loss = delta_loss + torch.mean(delta_target ** 2) * self.k_delta
+
                 # 稳定loss：与 base_controller 保持接近
                 if self.k_stable != 0 and base_controller is not None:
                     _, base_delta = base_controller.control(
@@ -184,7 +190,7 @@ class Controller(nn.Module):
                 state  = next_state
                 target = next_target
 
-            total_loss = (track_loss + smooth_loss + stable_loss) / self.train_horizon
+            total_loss = (track_loss + smooth_loss + stable_loss + delta_loss) / self.train_horizon
             total_loss.backward()
             if self.max_norm != 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_norm)
@@ -199,6 +205,7 @@ class Controller(nn.Module):
             metrics = {
                 'track_loss':  float(track_loss.item() / self.train_horizon),
                 'smooth_loss': float(smooth_loss.item() / self.train_horizon),
+                'delta_loss':  float(delta_loss.item() / self.train_horizon),
                 'total_loss':  float(total_loss.item()),
                 'grad_norm':   float(grad_norm),
             }

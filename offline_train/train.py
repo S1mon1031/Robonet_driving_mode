@@ -101,6 +101,7 @@ def train():
         now = datetime.now().strftime('%H:%M:%S')
         msg = (f'[{now}] Epoch {e:4d} ({elapsed:.1f}s) | track={metrics["track_loss"]:.4f} '
                f'smooth={metrics["smooth_loss"]:.4f} '
+               f'delta={metrics["delta_loss"]:.4f} '
                f'total={metrics["total_loss"]:.4f}'
                + (f' | dv={tsm["dv"][-1]:.4f} da={tsm["da"][-1]:.4f} ds={tsm["ds"][-1]:.4f}' if tsm["dv"] else ''))
         log(msg, log_file)

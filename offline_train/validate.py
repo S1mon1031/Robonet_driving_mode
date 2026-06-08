@@ -210,6 +210,38 @@ def validate(args):
         controller.load(args.controller)
         controller.eval()
 
+        if args.diag:
+            print('\n=== Controller 输出诊断（需先读取数据）===')
+            diag_csv = args.csv[:1]
+            diag_traj = getattr(cfg, 'traj_points', 20)
+            diag_states, diag_targets, diag_contexts = process_csv_files(diag_csv, diag_traj)
+            diag_state_seqs, diag_target_seqs, _, diag_context_seqs = build_sequences(
+                diag_states, diag_targets, diag_contexts, cfg.horizon,
+                traj_points=diag_traj, stride=10)
+            B = min(512, len(diag_state_seqs))
+            H = cfg.horizon
+            device = torch.device(cfg.device)
+            idx = np.random.choice(len(diag_state_seqs), B, replace=False)
+            s   = torch.tensor(diag_state_seqs[idx, H, :],    dtype=torch.float32).to(device)
+            ps  = torch.tensor(diag_state_seqs[idx, :H, :],   dtype=torch.float32).to(device)
+            t   = torch.tensor(diag_target_seqs[idx, H, :],   dtype=torch.float32).to(device)
+            pt  = torch.tensor(diag_target_seqs[idx, :H, :],  dtype=torch.float32).to(device)
+            ctx = torch.tensor(diag_context_seqs[idx],        dtype=torch.float32).to(device)
+            fut_idx = np.clip(np.arange(1, H+1) + H, 0, diag_target_seqs.shape[1]-1)
+            fut = torch.tensor(diag_target_seqs[np.ix_(idx, fut_idx)],
+                               dtype=torch.float32).to(device)
+            with torch.no_grad():
+                x = torch.cat([ps.reshape(B,-1), s, pt.reshape(B,-1), t,
+                                fut.reshape(B,-1), ctx], dim=-1)
+                raw = controller._controller(x)
+                _, delta = controller.control(s, ps, t, pt, fut, ctx)
+            print(f'  样本数: {B}，来自真实数据')
+            print(f'  raw (tanh输出): mean={raw.mean(dim=0).cpu().numpy().round(4)}, '
+                  f'std={raw.std(dim=0).cpu().numpy().round(4)}')
+            print(f'  delta(×max_range): mean={delta.mean(dim=0).cpu().numpy().round(4)}, '
+                  f'std={delta.std(dim=0).cpu().numpy().round(4)}')
+            return
+
     print(f'\n读取验证 CSV...')
     csv_traj_points = getattr(cfg, 'traj_points', 20)
     all_states, all_targets, all_contexts = process_csv_files(args.csv, csv_traj_points)
@@ -304,5 +336,7 @@ if __name__ == '__main__':
     parser.add_argument('--save',       type=str, default=None,  help='将逐步 MAE 保存为 CSV')
     parser.add_argument('--stride',     type=int, default=1,
                         help='验证样本滑窗步长，>1 可减少样本数（默认 1）')
+    parser.add_argument('--diag',       action='store_true',
+                        help='仅诊断 controller 输出分布，不跑完整验证')
     args = parser.parse_args()
     validate(args)
